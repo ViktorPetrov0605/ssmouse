@@ -12,7 +12,9 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 import time
+from dataclasses import replace
 from typing import Optional
 
 from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, Signal, Slot
@@ -35,7 +37,8 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
-from ..device import ENV_FAKE, DeviceNotFoundError, Mouse
+from ..device import ENV_FAKE, DeviceNotFoundError, Mouse, _fake_requested
+from ..events import Event, listen
 from ..profile import Profile
 from . import autostart
 from .model import Link, Snapshot, StatusTracker, describe_age, next_poll_delay, poll_once
@@ -51,9 +54,11 @@ from .pages import (
 from .widgets import TIER_COLORS, BatteryGauge, Chip, tray_icon
 
 APP_ID = "ssmouse-gui"
-INTERVALS = ((15, "15 seconds"), (30, "30 seconds"), (60, "1 minute"),
-             (120, "2 minutes"), (300, "5 minutes"))
-DEFAULT_INTERVAL = 60
+INTERVALS = ((5, "5 seconds"), (10, "10 seconds"), (15, "15 seconds"),
+             (30, "30 seconds"), (60, "1 minute"), (120, "2 minutes"), (300, "5 minutes"))
+#: Link, DPI and battery changes arrive instantly as receiver events; the
+#: poll is only a fallback, so it can stay fairly relaxed.
+DEFAULT_INTERVAL = 15
 
 LINK_COLORS = {
     Link.CONNECTED: TIER_COLORS["ok"],
@@ -91,6 +96,20 @@ class Poller(QObject):
             self.job_done.emit(tag, None, exc)
         finally:
             mouse.close()
+
+
+class EventWatcher(QObject):
+    """Forwards receiver push events (link, DPI level, battery) to the UI."""
+
+    event = Signal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stop = threading.Event()
+
+    @Slot()
+    def run(self) -> None:
+        listen(self.event.emit, self.stop)
 
 
 class MainWindow(QWidget):
@@ -142,7 +161,8 @@ class MainWindow(QWidget):
         for seconds, label in INTERVALS:
             self.interval_box.addItem(label, seconds)
         index = self.interval_box.findData(self.interval())
-        self.interval_box.setCurrentIndex(index if index >= 0 else 2)
+        self.interval_box.setCurrentIndex(
+            index if index >= 0 else self.interval_box.findData(DEFAULT_INTERVAL))
         self.interval_box.currentIndexChanged.connect(self._interval_changed)
 
         self.autostart_box = QCheckBox("Start on login")
@@ -288,6 +308,19 @@ class Controller(QObject):
         self.poller.job_done.connect(self.on_job_done)
         self.thread.start()
 
+        # Receiver push events: instant updates without polling the mouse.
+        self.event_thread: Optional[QThread] = None
+        self.event_refresh = QTimer(self)
+        self.event_refresh.setSingleShot(True)
+        self.event_refresh.timeout.connect(self.refresh)
+        if not _fake_requested():
+            self.event_thread = QThread()
+            self.watcher = EventWatcher()
+            self.watcher.moveToThread(self.event_thread)
+            self.event_thread.started.connect(self.watcher.run)
+            self.watcher.event.connect(self.on_event)
+            self.event_thread.start()
+
         self.linked = False
         self.config_loaded = False
         self.jobs_pending = 0
@@ -378,6 +411,24 @@ class Controller(QObject):
         self.window.refresh_button.setEnabled(False)
         self.poll_requested.emit()
 
+    @Slot(object)
+    def on_event(self, event: Event) -> None:
+        now = time.time()
+        if event.kind == "battery":
+            base = self.last or Snapshot(link=Link.CONNECTED)
+            self.on_snapshot(replace(base, link=Link.CONNECTED, battery=event.value,
+                                     battery_stale=False, battery_seen_at=now, taken_at=now))
+        elif event.kind == "dpi" and self.last is not None:
+            presets = self.last.presets
+            cpi = presets[event.value - 1] if event.value <= len(presets) else None
+            self.on_snapshot(replace(self.last, active_level=event.value, current_cpi=cpi,
+                                     taken_at=now), notify=False)
+            self.config_loaded = False  # refresh the Performance tab on the next poll
+            self.event_refresh.start(500)
+        elif event.kind == "link":
+            # The link flaps briefly while the mouse (re)connects; settle first.
+            self.event_refresh.start(1500 if event.value else 800)
+
     # -- configuration jobs ------------------------------------------------
     @Slot(str, object)
     def run_job(self, description: str, job) -> None:
@@ -464,10 +515,17 @@ class Controller(QObject):
                     10000,
                 )
 
-    @Slot()
-    def quit(self) -> None:
+    def stop_threads(self) -> None:
+        if self.event_thread is not None:
+            self.watcher.stop.set()
+            self.event_thread.quit()
+            self.event_thread.wait(2000)
         self.thread.quit()
         self.thread.wait(3000)
+
+    @Slot()
+    def quit(self) -> None:
+        self.stop_threads()
         self.app.quit()
 
 
@@ -515,8 +573,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     controller = Controller(app, start_minimized=args.minimized)
     server = _listen_for_instances(controller)  # noqa: F841 - keep alive
     code = app.exec()
-    controller.thread.quit()
-    controller.thread.wait(3000)
+    controller.stop_threads()
     return code
 
 

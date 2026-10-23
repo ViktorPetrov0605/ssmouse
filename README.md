@@ -94,11 +94,12 @@ ssmouse-gui --fake        # demo with captured data, no mouse needed
 
 * Left-click the tray icon to show or hide the window. Right-click for *Refresh*,
   *Start on login* and *Quit*. Closing the window keeps the app in the tray.
-* While the mouse is connected it updates every 1 minute by default
-  (configurable from 15 s to 5 min).
-* While the mouse is asleep, only the receiver is asked for the link state, which
-  costs nothing on the radio. That check runs every 5 s, so a fresh reading
-  appears soon after you touch the mouse.
+* Updates are **instant**: the receiver pushes events when the mouse connects
+  or disconnects, when you press the DPI button, and when the battery level
+  changes, and ssmouse listens for them. A regular poll (every 15 s by default,
+  adjustable from 5 s to 5 min) is only a safety net.
+* While the mouse sleeps, only the receiver is asked about the link, which costs
+  nothing on the radio.
 * Launching it a second time just brings up the existing window.
 * Tabs: **Status**, **Performance** (DPI presets, polling rate), **Lighting**,
   **Buttons** (press a shortcut to bind it), **Power** (sleep timer, sensor
@@ -385,6 +386,10 @@ firmware     (08|m) erase, (03|m) buffer, (05|m) push; m = 00 mouse, 40 receiver
 The 92-byte effect is `u32 duration_ms, i32 wave, i16 x, i16 y, 4 x u8 scale,
 u8 overflow + 3 pad, u32 trigger mask, u8 sections, rgb initial, 16 x (rgb,
 u8 share of the cycle in 1/255)`; see `ssmouse/lighting.py`.
+
+**Events.** The receiver pushes 64-byte input reports on interface 2 (usage
+page `0xFF00`): `28 01`/`28 00` mouse linked/lost, `16 NN` active DPI preset
+changed, `2A NN` battery NN %. ssmouse listens there (`ssmouse/events.py`).
 
 **DPI conversion.** The DPI struct stores sensor values, not CPI. The full
 `truemove-air` table (`0x00 → 100`, `0x02 → 200`, … `0xD6 → 18000`) is embedded

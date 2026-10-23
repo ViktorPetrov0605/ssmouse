@@ -221,3 +221,26 @@ def test_settings_pages(qapp) -> None:
     buttons.rows["left"].set_spec("disabled")
     with pytest.raises(ValueError, match="Left click"):
         buttons.bindings()
+
+
+def test_controller_applies_push_events(qapp, tmp_path, monkeypatch) -> None:
+    from PySide6.QtCore import QSettings
+
+    from ssmouse.events import Event
+    from ssmouse.gui import app as gui_app
+
+    monkeypatch.setenv("SSMOUSE_FAKE", "1")  # no event thread, fake device
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr(gui_app, "QSettings",
+                        lambda *a: QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat))
+    controller = gui_app.Controller(qapp, start_minimized=True)
+    try:
+        controller.on_snapshot(poll_once(lambda: make_fake_mouse()), notify=False)
+        controller.on_event(Event("battery", 33))
+        assert controller.last.battery == 33
+        assert controller.window.gauge.accessibleName() == "Battery 33%"
+        controller.on_event(Event("dpi", 4))
+        assert controller.last.active_level == 4 and controller.last.current_cpi == 2800
+        assert controller.event_refresh.isActive()
+    finally:
+        controller.stop_threads()
