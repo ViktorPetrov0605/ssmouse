@@ -109,6 +109,52 @@ class DeviceWorker(QObject):
         self.executor.shutdown(wait=True, cancel_futures=True)
 
 
+class NetworkWorker(QObject):
+    """Update checks and downloads, kept off the device worker."""
+
+    checked = Signal(object, object, object)  # GG release, app release, error text
+    downloaded = Signal(object, object)  # FirmwarePackage, error text
+    progress = Signal(int, int)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ssmouse-net")
+
+    def check(self) -> None:
+        self.executor.submit(self._check)
+
+    def _check(self) -> None:
+        from .. import updates
+
+        try:
+            gg = updates.check_gg_release()
+            app = updates.check_app_release()
+        except Exception as exc:  # noqa: BLE001 - reported to the UI
+            self.checked.emit(None, None, str(exc))
+            return
+        self.checked.emit(gg, app, None)
+
+    def download(self) -> None:
+        self.executor.submit(self._download)
+
+    def _download(self) -> None:
+        from .. import updates
+
+        try:
+            _, package = updates.fetch_firmware(progress=self.progress.emit)
+        except Exception as exc:  # noqa: BLE001 - reported to the UI
+            self.downloaded.emit(None, str(exc))
+            return
+        self.downloaded.emit(package, None if package else "no newer release")
+
+    def shutdown(self) -> None:
+        self.executor.shutdown(wait=False, cancel_futures=True)
+
+
+#: Automatic update checks run at most this often.
+UPDATE_CHECK_INTERVAL_S = 24 * 3600
+
+
 class EventWatcher(QObject):
     """Forwards receiver push events (link, DPI level, battery) to the UI."""
 
@@ -354,6 +400,27 @@ class Controller(QObject):
             page.set_linked(False)
         self.pages[-1].profile_replaced.connect(self.replace_profile)
 
+        # Firmware / ssmouse update checks (network, separate from device I/O).
+        self.device_page: DevicePage = self.pages[-1]
+        self.net = NetworkWorker()
+        self.net.checked.connect(self.on_update_checked)
+        self.net.downloaded.connect(self.on_firmware_downloaded)
+        self.net.progress.connect(self.device_page.show_progress)
+        self.device_page.check_requested.connect(lambda: self.check_updates(manual=True))
+        self.device_page.download_requested.connect(self.download_firmware)
+        self.device_page.auto_check.setChecked(
+            self.settings.value("auto_update_check", True, type=bool))
+        self.device_page.auto_check.toggled.connect(
+            lambda on: self.settings.setValue("auto_update_check", on))
+        self.manual_check = False
+        from .. import updates
+
+        self.device_page.set_package(updates.best_package())
+        self.update_timer = QTimer(self)
+        self.update_timer.timeout.connect(self.maybe_check_updates)
+        self.update_timer.start(3600 * 1000)
+        QTimer.singleShot(30 * 1000, self.maybe_check_updates)
+
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self.refresh)
@@ -420,6 +487,62 @@ class Controller(QObject):
         self.busy = True
         self.window.refresh_button.setEnabled(False)
         self.poll_requested.emit()
+
+    # -- update checks ----------------------------------------------------
+    @Slot()
+    def maybe_check_updates(self) -> None:
+        if _fake_requested() or not self.device_page.auto_check.isChecked():
+            return
+        last = float(self.settings.value("last_update_check", 0.0, type=float))
+        if time.time() - last >= UPDATE_CHECK_INTERVAL_S:
+            self.check_updates(manual=False)
+
+    def check_updates(self, manual: bool) -> None:
+        self.manual_check = manual
+        self.device_page.set_busy(True)
+        self.net.check()
+
+    @Slot(object, object, object)
+    def on_update_checked(self, gg_release, app_release, error) -> None:
+        self.device_page.set_busy(False)
+        self.device_page.show_check_result(gg_release, app_release, error)
+        if error:
+            if self.manual_check:
+                self.window.show_message("Update check failed: %s" % error, error=True)
+            return
+        self.settings.setValue("last_update_check", time.time())
+        # Notify once per new version, not on every daily check.
+        for key, release, text in (
+            ("notified_gg", gg_release,
+             "SteelSeries GG %s may contain new mouse firmware. Open ssmouse \u2192 Device "
+             "to download it."),
+            ("notified_app", app_release, "ssmouse %s is available."),
+        ):
+            if release is None or self.settings.value(key, "") == release.version:
+                continue
+            self.settings.setValue(key, release.version)
+            if self.tray is not None:
+                self.tray.showMessage("ssmouse", text % release.version,
+                                      QSystemTrayIcon.MessageIcon.Information, 10000)
+        if self.manual_check and gg_release is None and app_release is None:
+            self.window.show_message("Everything is up to date")
+
+    @Slot()
+    def download_firmware(self) -> None:
+        self.device_page.set_busy(True)
+        self.window.show_message("Downloading SteelSeries GG to extract the firmware\u2026")
+        self.net.download()
+
+    @Slot(object, object)
+    def on_firmware_downloaded(self, package, error) -> None:
+        self.device_page.set_busy(False)
+        if error or package is None:
+            self.window.show_message("Firmware download failed: %s" % error, error=True)
+            return
+        self.device_page.set_package(package)
+        self.device_page.download_button.hide()
+        self.window.show_message("Firmware %s downloaded; see Device \u2192 Firmware"
+                                 % package.version)
 
     @Slot(object)
     def on_event(self, event: Event) -> None:
@@ -526,6 +649,7 @@ class Controller(QObject):
                 )
 
     def stop_threads(self) -> None:
+        self.net.shutdown()
         if self.watcher is not None:
             self.watcher.shutdown()
         self.worker.shutdown()

@@ -118,9 +118,12 @@ def add_parsers(subparsers, common: argparse.ArgumentParser) -> None:
     rp.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     fw = subparsers.add_parser("firmware", parents=[common],
                                help="show firmware versions or install an update")
-    fw.add_argument("action", nargs="?", choices=("status", "update"), default="status")
+    fw.add_argument("action", nargs="?", choices=("status", "check", "download", "update"),
+                    default="status",
+                    help="status: installed versions; check: look for new firmware online; "
+                         "download: fetch it from SteelSeries; update: install it")
     fw.add_argument("folder", nargs="?", type=Path,
-                    help="update: the firmware/272111664 folder of a SteelSeries GG install")
+                    help="update: a firmware/272111664 folder (default: the newest download)")
     fw.add_argument("--dry-run", action="store_true", help="validate and show the plan only")
     fw.add_argument("--force", action="store_true",
                     help="also flash when the installed firmware is the same or newer")
@@ -321,12 +324,19 @@ def _execute(args, mouse: Mouse, profile: Profile, effect) -> str:
 def _firmware(args, make_mouse: Callable[[], Mouse], as_json: bool) -> int:
     from . import firmware
 
+    from . import updates
+
+    if args.action in ("check", "download"):
+        return _firmware_online(args.action, as_json)
     package = None
     if args.action == "update":
-        if not args.folder:
-            raise ValueError("firmware update needs the GG firmware folder "
-                             "(…/SteelSeries GG/apps/engine/firmware/272111664)")
-        package = firmware.load_package(args.folder)
+        if args.folder:
+            package = firmware.load_package(args.folder)
+        else:
+            package = updates.best_package()
+            if package is None:
+                raise ValueError("no firmware downloaded yet: run `ssmouse firmware download`, "
+                                 "or pass a GG firmware/272111664 folder")
     mouse = make_mouse()
     try:
         if args.action == "status":
@@ -367,3 +377,55 @@ def _firmware(args, make_mouse: Callable[[], Mouse], as_json: bool) -> int:
         return 0
     finally:
         mouse.close()
+
+
+def _firmware_online(action: str, as_json: bool) -> int:
+    from . import firmware, updates
+
+    if action == "check":
+        release = updates.check_gg_release()
+        local = updates.best_package()
+        try:
+            app = updates.check_app_release()
+        except updates.UpdateError as exc:
+            app, app_error = None, str(exc)
+        else:
+            app_error = None
+        if as_json:
+            print(json.dumps({
+                "gg_release": release.__dict__ if release else None,
+                "known_firmware": local.version if local else firmware.LATEST_KNOWN,
+                "ssmouse_release": app.__dict__ if app else None,
+            }))
+            return 0
+        if release is None:
+            print("firmware : no newer SteelSeries GG than %s, so no new firmware "
+                  "(newest known: %s)" % (updates.last_checked_gg(),
+                                          local.version if local else firmware.LATEST_KNOWN))
+        else:
+            print("firmware : SteelSeries GG %s is out and may contain new firmware; "
+                  "run `ssmouse firmware download` (about 430 MB)" % release.version)
+        if app_error:
+            print("ssmouse  : could not check (%s)" % app_error)
+        else:
+            print("ssmouse  : %s" % ("version %s is available: %s" % (app.version, app.url)
+                                    if app else "up to date (%s)" % updates.__version__))
+        return 0
+
+    last = [-1]
+
+    def progress(done: int, total: int) -> None:
+        percent = done * 100 // total if total else 0
+        if percent != last[0]:
+            last[0] = percent
+            print("\r  downloading SteelSeries GG: %3d%%" % percent, end="", flush=True)
+
+    release, package = updates.fetch_firmware(progress=progress)
+    if release is None:
+        print("nothing to download: SteelSeries GG %s is the newest release"
+              % updates.last_checked_gg())
+        return 0
+    print("\nSteelSeries GG %s contains Rival 3 Wireless firmware %s (saved in %s)"
+          % (release.version, package.version, package.source))
+    print("install it with: ssmouse firmware update")
+    return 0

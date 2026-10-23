@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QKeySequenceEdit,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QRadioButton,
     QSpinBox,
@@ -632,6 +633,8 @@ class PowerPage(Page):
 
 class DevicePage(Page):
     profile_replaced = Signal(object)
+    check_requested = Signal()
+    download_requested = Signal()
 
     def __init__(self, profile: Profile, parent: Optional[QWidget] = None) -> None:
         super().__init__(profile, parent)
@@ -648,16 +651,42 @@ class DevicePage(Page):
         export.clicked.connect(self._export)
         import_ = QPushButton("Import profile…")
         import_.clicked.connect(self._import)
-        self.firmware_label = QLabel("Firmware: checking when the mouse is awake\u2026")
+        self.firmware_label = QLabel("Installed: checking when the mouse is awake\u2026")
         self.firmware_label.setWordWrap(True)
-        update = QPushButton("Install firmware from folder\u2026")
-        update.setToolTip("Select the firmware/272111664 folder of a SteelSeries GG install")
-        update.clicked.connect(self._update_firmware)
-        self.writers = [reset, reapply, import_, update]
-        firmware_box = QGroupBox("Firmware")
+        self.online_label = QLabel("New firmware comes with SteelSeries GG releases; "
+                                   "ssmouse checks SteelSeries' release feed for them.")
+        self.online_label.setWordWrap(True)
+        self.online_label.setOpenExternalLinks(True)
+        self.progress = QProgressBar()
+        self.progress.hide()
+        self.check_button = QPushButton("Check for updates")
+        self.check_button.clicked.connect(self.check_requested)
+        self.download_button = QPushButton("Download firmware")
+        self.download_button.setToolTip("Downloads the SteelSeries GG installer (about 430 MB) "
+                                        "from SteelSeries and keeps only the firmware")
+        self.download_button.clicked.connect(self.download_requested)
+        self.download_button.hide()
+        self.install_button = QPushButton("Install firmware")
+        self.install_button.clicked.connect(lambda: self._confirm_install(self.package))
+        self.install_button.hide()
+        from_folder = QPushButton("From folder\u2026")
+        from_folder.setToolTip("Select the firmware/272111664 folder of a SteelSeries GG install")
+        from_folder.clicked.connect(self._update_firmware)
+        self.auto_check = QCheckBox("Check for firmware and ssmouse updates daily")
+        self.package: Optional[firmware.FirmwarePackage] = None
+        self.writers = [reset, reapply, import_, from_folder, self.install_button]
+        firmware_box = QGroupBox("Firmware and updates")
         fwl = QVBoxLayout(firmware_box)
         fwl.addWidget(self.firmware_label)
-        fwl.addWidget(update, 0, Qt.AlignmentFlag.AlignLeft)
+        fwl.addWidget(self.online_label)
+        fwl.addWidget(self.progress)
+        buttons = QHBoxLayout()
+        for button in (self.check_button, self.download_button, self.install_button,
+                       from_folder):
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        fwl.addLayout(buttons)
+        fwl.addWidget(self.auto_check)
 
         wireless = QGroupBox("Wireless")
         wl = QVBoxLayout(wireless)
@@ -693,11 +722,54 @@ class DevicePage(Page):
         status = self.config.firmware
         if status is None:
             return
-        verdict = {True: "up to date", False: "an update is available",
-                   None: "unknown"}[status.up_to_date]
+        newest = self.package.version if self.package else status.latest_known
+        installed = [v for v in (status.mouse, status.receiver) if v]
+        outdated = bool(installed) and any(
+            firmware.parse_version(v) < firmware.parse_version(newest) for v in installed)
         self.firmware_label.setText(
-            "Mouse %s, receiver %s. Newest known: %s (SteelSeries GG 122) \u2014 %s."
-            % (status.mouse or "?", status.receiver or "?", status.latest_known, verdict))
+            "Installed: mouse %s, receiver %s. Newest available: %s \u2014 %s."
+            % (status.mouse or "?", status.receiver or "?", newest,
+               "update available" if outdated else "up to date"))
+        self.install_button.setVisible(outdated and self.package is not None)
+        if self.package is not None:
+            self.install_button.setText("Install firmware %s" % self.package.version)
+
+    def set_package(self, package: Optional[firmware.FirmwarePackage]) -> None:
+        self.package = package
+        self.reload()
+
+    def show_check_result(self, gg_release, app_release, error: Optional[str]) -> None:
+        import time as _time
+
+        stamp = _time.strftime("%H:%M")
+        if error:
+            self.online_label.setText("Update check failed (%s): %s" % (stamp, error))
+            return
+        parts = []
+        if gg_release is None:
+            parts.append("No newer SteelSeries GG release, so no new firmware (checked %s)."
+                         % stamp)
+        else:
+            parts.append("SteelSeries GG %s is out and may contain new firmware."
+                         % gg_release.version)
+        if app_release is not None:
+            parts.append('ssmouse %s is available: <a href="%s">download</a>.'
+                         % (app_release.version, app_release.url))
+        self.online_label.setText(" ".join(parts))
+        self.download_button.setVisible(gg_release is not None)
+
+    def set_busy(self, busy: bool) -> None:
+        self.check_button.setEnabled(not busy)
+        self.download_button.setEnabled(not busy)
+        self.progress.setVisible(busy)
+        if busy:
+            self.progress.setRange(0, 0)
+
+    def show_progress(self, done: int, total: int) -> None:
+        if total:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(done * 100 // total)
+            self.progress.setFormat("Downloading SteelSeries GG: %%p%% of %d MB" % (total >> 20))
 
     def _update_firmware(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -710,6 +782,11 @@ class DevicePage(Page):
             package = firmware.load_package(Path(folder))
         except (OSError, ValueError, firmware.FirmwareError) as exc:
             QMessageBox.warning(self, "Firmware", str(exc))
+            return
+        self._confirm_install(package)
+
+    def _confirm_install(self, package: Optional[firmware.FirmwarePackage]) -> None:
+        if package is None:
             return
         answer = QMessageBox.warning(
             self, "Install firmware %s" % package.version,

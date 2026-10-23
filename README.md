@@ -19,7 +19,7 @@ battery tray icon, and as a scriptable CLI.
 | Button and wheel remapping: mouse buttons, DPI cycle, scroll, key combos, media keys, disable | ✓ | ✓ |
 | Sleep timer, sensor rest, high-efficiency mode | ✓ | ✓ |
 | Button debounce (in GG's device descriptor, not shown in its UI) | – | ✓ |
-| Firmware version check and update | ✓ | ✓ (with your GG firmware files) |
+| Firmware update check, download and install | ✓ | ✓ (straight from SteelSeries) |
 | Pairing, factory reset | ✓ | ✓ |
 | Profiles: export / import | cloud | JSON file |
 | Macros, acceleration / angle snapping, Prism Sync, GameSense | ✓ | – (implemented in GG's Windows driver, not in the mouse) |
@@ -191,15 +191,44 @@ switched off. Your settings are also recorded in a profile file
 
 ### Firmware updates
 
-SteelSeries' firmware can't be redistributed, so `ssmouse firmware update` uses
-the files from a SteelSeries GG installation (`apps/engine/firmware/272111664/`).
-It follows GG's procedure exactly: it flashes the mouse over 2.4 GHz, then the
-receiver's radio and USB chips, which takes about a minute. The protocol has no
-checksum, so ssmouse refuses unless the files are newer than what's installed,
-the mouse is awake and the battery is at least 30 %. **Do not switch off the
-mouse or unplug the receiver while it runs.** `--dry-run` validates the files
-and shows the plan without writing anything. SteelSeries GG 122 ships 1.04,
-which is what current mice already run.
+SteelSeries has no separate firmware feed: new firmware ships inside
+SteelSeries GG releases, and GG compares the firmware bundled with it against
+the device. ssmouse does the same, but downloads straight from SteelSeries
+instead of redistributing anything:
+
+```console
+ssmouse firmware              # installed versions vs. newest known
+ssmouse firmware check        # ask SteelSeries for a newer GG release (and GitHub for ssmouse)
+ssmouse firmware download     # fetch that GG installer from SteelSeries, keep only the firmware
+ssmouse firmware update       # install the newest downloaded firmware
+ssmouse firmware update PATH  # ...or the firmware/272111664 folder of an existing GG install
+```
+
+How it works:
+
+1. `GET https://steelseries.com/api/v2/releases/gg/check-version?platform=windows&current_version=X`
+   answers **204** when GG X is current, or **200** with `version`, `installer_url`
+   and an MD5 `checksum`. The previous release gets a small patch installer
+   without firmware, so ssmouse resolves the **full** installer.
+2. The installer (about 430 MB) comes from SteelSeries' CDN and is MD5-verified.
+   7-Zip extracts only `apps/engine/firmware/272111664/`, and then the installer
+   is deleted. You need 7-Zip installed (`p7zip`/`7zip` on Linux,
+   `brew install sevenzip` on macOS, 7-zip.org on Windows).
+3. The images are validated (sizes, ARM vector tables, `version.json`). The
+   update then runs GG's exact sequence: it flashes the mouse over 2.4 GHz,
+   then the receiver's radio and USB chips, which takes about a minute.
+
+The protocol has no checksum, so ssmouse refuses unless the firmware is newer
+than what's installed, the mouse is awake and the battery is at least 30 %.
+**Do not switch off the mouse or unplug the receiver while it runs.**
+`--dry-run` shows the plan without writing anything. SteelSeries GG 122 ships
+1.04, which is what current mice already run.
+
+In the app, *Device → Firmware and updates* does the same with buttons. With
+*Check for firmware and ssmouse updates daily* on (the default), the app makes
+two small requests a day, to SteelSeries' version check and to GitHub's
+releases API. It notifies you once per new version and never downloads or
+flashes anything by itself.
 
 ### Usage
 
@@ -417,6 +446,8 @@ ssmouse/
 ├── bindings.py    # button / wheel mapping encoder, key and media names
 ├── profile.py     # JSON profile, apply to mouse, config directory per OS
 ├── firmware.py    # version check, package validation, GG's update sequence
+├── updates.py     # SteelSeries release feed, installer download, ssmouse releases
+├── events.py      # receiver push events (link, DPI level, battery)
 ├── cli.py         # info/battery/dpi, --json, --watch, --debug
 ├── cli_config.py  # set / light / bind / profile / pair / reset / firmware
 └── gui/

@@ -43,6 +43,7 @@ from .device import (
     Mouse,
 )
 from .firmware import FirmwareError
+from .updates import UpdateError
 from .protocol import FRAMING_PRESETS, ProtocolError
 from .status import NOT_LINKED_MESSAGE, collect_info, require_link
 from .transport import TransportError, available_backends, set_trace
@@ -476,7 +477,8 @@ def _main_impl(argv: Optional[list[str]] = None) -> int:
         except DeviceNotFoundError as exc:
             print("ssmouse: %s" % exc, file=sys.stderr)
             return EXIT_NO_DEVICE
-        except (TransportError, ProtocolError, ValueError, OSError, FirmwareError) as exc:
+        except (TransportError, ProtocolError, ValueError, OSError, FirmwareError,
+                UpdateError) as exc:
             print("ssmouse: %s" % exc, file=sys.stderr)
             return EXIT_ERROR
 
