@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ssmouse
+GenericName=Mouse Battery
+Comment=Battery level and DPI of SteelSeries wireless mice
+Exec=ssmouse-gui
+Icon=input-mouse
+Terminal=false
+Categories=Utility;
+Keywords=steelseries;mouse;battery;dpi;rival;
+StartupWMClass=ssmouse
