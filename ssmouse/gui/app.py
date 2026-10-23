@@ -14,10 +14,11 @@ import os
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import Optional
 
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
@@ -69,22 +70,29 @@ LINK_COLORS = {
 }
 
 
-class Poller(QObject):
-    """Runs all device I/O on one worker thread.
+class DeviceWorker(QObject):
+    """Runs all device I/O on one background thread.
 
-    Polls and configuration jobs are serialised here, so timeouts never
-    freeze the UI and two commands never interleave on the HID interface.
+    Polls and configuration jobs are queued on a single-thread executor, so
+    timeouts never freeze the UI and two commands never interleave on the HID
+    interface.  This QObject itself lives in the GUI thread; Qt queues the
+    signals emitted from the worker thread automatically.
     """
 
     result = Signal(object)
     job_done = Signal(str, object, object)  # tag, result, error
 
-    @Slot()
-    def poll(self) -> None:
-        self.result.emit(poll_once())
+    def __init__(self) -> None:
+        super().__init__()
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ssmouse-device")
 
-    @Slot(str, object)
+    def poll(self) -> None:
+        self.executor.submit(lambda: self.result.emit(poll_once()))
+
     def run_job(self, tag: str, job) -> None:
+        self.executor.submit(self._run_job, tag, job)
+
+    def _run_job(self, tag: str, job) -> None:
         try:
             mouse = Mouse.detect()
         except Exception as exc:  # noqa: BLE001 - reported to the UI
@@ -97,6 +105,9 @@ class Poller(QObject):
         finally:
             mouse.close()
 
+    def shutdown(self) -> None:
+        self.executor.shutdown(wait=True, cancel_futures=True)
+
 
 class EventWatcher(QObject):
     """Forwards receiver push events (link, DPI level, battery) to the UI."""
@@ -106,10 +117,15 @@ class EventWatcher(QObject):
     def __init__(self) -> None:
         super().__init__()
         self.stop = threading.Event()
+        self.thread = threading.Thread(target=listen, args=(self.event.emit, self.stop),
+                                       name="ssmouse-events", daemon=True)
 
-    @Slot()
-    def run(self) -> None:
-        listen(self.event.emit, self.stop)
+    def start(self) -> None:
+        self.thread.start()
+
+    def shutdown(self) -> None:
+        self.stop.set()
+        self.thread.join(2.0)
 
 
 class MainWindow(QWidget):
@@ -299,29 +315,21 @@ class Controller(QObject):
         self.window.refresh_requested.connect(self.refresh)
         self.window.interval_box.currentIndexChanged.connect(self.refresh)
 
-        self.thread = QThread()
-        self.poller = Poller()
-        self.poller.moveToThread(self.thread)
-        self.thread.finished.connect(self.poller.deleteLater)
-        self.poll_requested.connect(self.poller.poll)
-        self.job_requested.connect(self.poller.run_job)
-        self.poller.result.connect(self.on_result)
-        self.poller.job_done.connect(self.on_job_done)
-        self.thread.start()
+        self.worker = DeviceWorker()
+        self.poll_requested.connect(self.worker.poll)
+        self.job_requested.connect(self.worker.run_job)
+        self.worker.result.connect(self.on_result)
+        self.worker.job_done.connect(self.on_job_done)
 
         # Receiver push events: instant updates without polling the mouse.
-        self.event_thread: Optional[QThread] = None
+        self.watcher: Optional[EventWatcher] = None
         self.event_refresh = QTimer(self)
         self.event_refresh.setSingleShot(True)
         self.event_refresh.timeout.connect(self.refresh)
         if not _fake_requested():
-            self.event_thread = QThread()
             self.watcher = EventWatcher()
-            self.watcher.moveToThread(self.event_thread)
-            self.event_thread.finished.connect(self.watcher.deleteLater)
-            self.event_thread.started.connect(self.watcher.run)
             self.watcher.event.connect(self.on_event)
-            self.event_thread.start()
+            self.watcher.start()
 
         self.linked = False
         self.config_loaded = False
@@ -518,12 +526,9 @@ class Controller(QObject):
                 )
 
     def stop_threads(self) -> None:
-        if self.event_thread is not None:
-            self.watcher.stop.set()
-            self.event_thread.quit()
-            self.event_thread.wait(2000)
-        self.thread.quit()
-        self.thread.wait(3000)
+        if self.watcher is not None:
+            self.watcher.shutdown()
+        self.worker.shutdown()
 
     @Slot()
     def quit(self) -> None:

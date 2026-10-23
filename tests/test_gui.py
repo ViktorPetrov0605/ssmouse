@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 
 import pytest
@@ -131,13 +130,9 @@ def test_autostart_entry(tmp_path, monkeypatch) -> None:
 # -- widgets (need PySide6) ---------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def qapp():
-    pytest.importorskip("PySide6")
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
+@pytest.fixture
+def qapp(qapp_session):
+    return qapp_session
 
 
 def test_tray_icon_renders_all_states(qapp) -> None:
@@ -244,8 +239,3 @@ def test_controller_applies_push_events(qapp, tmp_path, monkeypatch) -> None:
         assert controller.event_refresh.isActive()
     finally:
         controller.stop_threads()
-        controller.window.deleteLater()
-        controller.deleteLater()
-        from PySide6.QtCore import QCoreApplication, QEvent
-
-        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

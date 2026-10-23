@@ -316,9 +316,16 @@ class LightingPage(Page):
         self.colors_row.addWidget(button)
         self._update_mode()
 
+    def _drop_color(self) -> None:
+        # Remove synchronously: deleteLater() on a widget Python still wraps can
+        # be freed twice at shutdown.
+        button = self.color_buttons.pop()
+        self.colors_row.removeWidget(button)
+        button.setParent(None)
+
     def _remove_color(self) -> None:
         if len(self.color_buttons) > 1:
-            self.color_buttons.pop().deleteLater()
+            self._drop_color()
         self._update_mode()
 
     def _update_mode(self) -> None:
@@ -340,7 +347,7 @@ class LightingPage(Page):
     def reload(self) -> None:
         effect = self.profile.lighting or LightingEffect()
         while self.color_buttons:
-            self.color_buttons.pop().deleteLater()
+            self._drop_color()
         for color in effect.colors:
             self._add_color(color)
         self.mode.setCurrentIndex(max(0, self.mode.findData(effect.mode)))
