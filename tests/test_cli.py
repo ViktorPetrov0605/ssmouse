@@ -197,6 +197,9 @@ def test_override_options_do_not_crash() -> None:
 
 def test_apply_env_overrides_sets_variables(monkeypatch) -> None:
     from ssmouse import cli
+    from ssmouse.transport import available_backends
+
+    backend = available_backends()[-1]  # ctypes-hidraw on Linux, hidapi-hid elsewhere
 
     parser = cli.build_parser()
     args = parser.parse_args(
@@ -207,7 +210,7 @@ def test_apply_env_overrides_sets_variables(monkeypatch) -> None:
             "--path",
             "/dev/hidraw9",
             "--backend",
-            "ctypes-hidraw",
+            backend,
             "--framing",
             "canonical",
             "battery",
@@ -225,7 +228,7 @@ def test_apply_env_overrides_sets_variables(monkeypatch) -> None:
     assert os.environ["SSMOUSE_FAKE"] == "1"
     assert os.environ["SSMOUSE_INTERFACE"] == "3"
     assert os.environ["SSMOUSE_HIDRAW"] == "/dev/hidraw9"
-    assert os.environ["SSMOUSE_BACKEND"] == "ctypes-hidraw"
+    assert os.environ["SSMOUSE_BACKEND"] == backend
     assert os.environ["SSMOUSE_FRAMING"] == "canonical"
 
 

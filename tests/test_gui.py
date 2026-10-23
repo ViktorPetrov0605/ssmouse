@@ -114,7 +114,7 @@ def test_describe_age() -> None:
     assert describe_age(1000.0, now=1000.0 + 3 * 3600) == "3 h ago"
 
 
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="Windows uses the registry")
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="XDG autostart is Linux")
 def test_autostart_entry(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     assert not autostart.is_enabled()
@@ -244,3 +244,8 @@ def test_controller_applies_push_events(qapp, tmp_path, monkeypatch) -> None:
         assert controller.event_refresh.isActive()
     finally:
         controller.stop_threads()
+        controller.window.deleteLater()
+        controller.deleteLater()
+        from PySide6.QtCore import QCoreApplication, QEvent
+
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
