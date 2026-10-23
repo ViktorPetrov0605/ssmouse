@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ssmouse"
-version = "0.2.0"
-description = "Battery tray app and CLI for SteelSeries Rival 3 Wireless mice (no SteelSeries GG needed)"
+version = "0.3.0"
+description = "Open-source SteelSeries GG replacement for the Rival 3 Wireless: battery, DPI, lighting, buttons, power, firmware"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

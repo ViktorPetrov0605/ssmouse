@@ -1,0 +1,65 @@
+name: Release
+
+# Push a tag like v0.3.0 to build standalone apps and attach them to a release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, name: linux-x86_64 }
+          - { os: windows-latest, name: windows-x86_64 }
+          - { os: macos-latest, name: macos-arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[gui]" pyinstaller
+      - name: Build
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --onefile --name ssmouse --paths . packaging/ssmouse_cli.py
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            pyinstaller --noconfirm --windowed --name ssmouse-gui --paths . \
+              --osx-bundle-identifier io.github.viktorpetrov0605.ssmouse packaging/ssmouse_gui.py
+          else
+            pyinstaller --noconfirm --onefile --windowed --name ssmouse-gui --paths . packaging/ssmouse_gui.py
+          fi
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p out
+          case "$RUNNER_OS" in
+            Windows) 7z a "out/ssmouse-${{ matrix.name }}.zip" ./dist/ssmouse.exe ./dist/ssmouse-gui.exe README.md LICENSE ;;
+            macOS)   (cd dist && zip -qry "../out/ssmouse-${{ matrix.name }}.zip" ssmouse ssmouse-gui.app) ;;
+            *)       cp udev/99-steelseries.rules data/ssmouse-gui.desktop dist/ &&
+                     tar -czf "out/ssmouse-${{ matrix.name }}.tar.gz" -C dist ssmouse ssmouse-gui 99-steelseries.rules ssmouse-gui.desktop ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ssmouse-${{ matrix.name }}
+          path: out/*
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          generate_release_notes: true

@@ -25,8 +25,8 @@ Input reports are unnumbered 64-byte interrupt-IN transfers; on Linux they
 arrive *without* a report-ID prefix, so ``data[0]`` is the first struct field
 after the descriptor's ``report_id`` field.
 
-Commands (read-only subset)
----------------------------
+Read commands
+-------------
 =========================  ==========================  ====================
 Purpose                    Request                     Response
 =========================  ==========================  ====================
@@ -39,7 +39,22 @@ Firmware version           ``D0`` (dongle read 0x10)   fw_major, fw_minor
 RF / connection status     ``E8`` (dongle read 0xA8)   byte 0 == 4 => connected
                            ``A8`` fallback (read-op 0xA8)
 Power mode                 ``AB`` (read-op 0x2B)       power_saving, movement_saving, uint16 idle_lighting, uint16 idle_sleep
+Debounce                   ``9E`` (read-op 0x1E)       make_ms, break_ms
 =========================  ==========================  ====================
+
+Write commands (no response; verify by reading back)
+-----------------------------------------------------
+=========================  ===========================================
+Polling rate               ``17 level`` (0..3 = 1000/500/250/125 Hz)
+DPI presets (batch)        ``20 count active s1 s2 s3 s4 s5`` (uint16 LE sensor values)
+Power mode                 ``2B saving movement u16 idle_lighting u16 idle_sleep_s``
+Debounce                   ``1E make break``
+Live LED colour            ``13 01 r g b`` (until ``18`` restart-lighting)
+Lighting effect            ``03`` flash buffer writes, ``05`` push, ``1C`` element info
+Button / wheel mapping     ``19`` 7 x (function, 4 key bytes), ``1A`` 2 x (...)
+Save to flash              ``09``
+Factory reset              ``1B``
+=========================  ===========================================
 
 Timing rules from the vendor code: keep at least ~30 ms between commands, use
 a 300-800 ms read timeout and 2 retries.
@@ -230,6 +245,17 @@ TRUEMOVE_AIR_MIN_SENSOR = 0x00
 TRUEMOVE_AIR_MAX_SENSOR = 0xD6
 
 
+def sensor_value_from_cpi(cpi: int) -> int:
+    """Inverse of :func:`cpi_from_sensor_value`: the table entry nearest *cpi*."""
+    if cpi <= 0:
+        raise ValueError("CPI must be positive")
+    return min(_TRUEMOVE_AIR_TABLE, key=lambda value: (abs(_TRUEMOVE_AIR_TABLE[value] - cpi), value))
+
+
+#: CPI values the sensor supports (100..18000 in steps of 100).
+SUPPORTED_CPI = tuple(sorted(_TRUEMOVE_AIR_TABLE.values()))
+
+
 def cpi_from_sensor_value(sensor_value: int) -> Optional[int]:
     """Convert a truemove-air sensor value to CPI (vendor table + fallback).
 
@@ -335,6 +361,12 @@ class PowerMode:
 
 #: Polling-rate level -> Hz, from the vendor descriptor.
 POLLING_RATE_HZ = {0: 1000, 1: 500, 2: 250, 3: 125}
+POLLING_RATE_LEVEL = {hz: level for level, hz in POLLING_RATE_HZ.items()}
+
+#: Number of DPI presets the mouse stores.
+MAX_DPI_LEVELS = 5
+#: Sleep-timer choices offered by SteelSeries GG (seconds; 1..20 minutes).
+SLEEP_TIMER_CHOICES_S = tuple(60 * minutes for minutes in range(1, 21))
 
 
 class Protocol:
@@ -364,10 +396,24 @@ class Protocol:
     CMD_POWER_MODE = (0xAB,)
     #: Pairing (write): dongle-write-op(pairing_op 0x31) = 0x40 | 0x31 = 0x71,
     #: followed by the struct's constant dummy byte 0x00.  Used by
-    #: ``tools/probe.py --pair`` (the app itself is read-only).
+    #: ``Mouse.pair`` and ``tools/probe.py --pair``.
     CMD_PAIR_DONGLE = (0x71, 0x00)
     #: Wireless reset (write): dongle-write-op(wireless_reset 0x33) = 0x73.
     CMD_RESET_WIRELESS = (0x73,)
+    #: Debounce: read-op(button_debounce_op 0x1E) = 0x9E.
+    CMD_DEBOUNCE_READ = (0x9E,)
+
+    # Write opcodes (write-op = opcode itself; the mouse sends no response).
+    OP_POLLING_RATE = 0x17
+    OP_BATCH_CPI = 0x20
+    OP_POWER_MODE = 0x2B
+    OP_DEBOUNCE = 0x1E
+    OP_LED_DIRECT = 0x13
+    OP_RESTART_LIGHTING = 0x18
+    OP_BUTTON_MAPPING = 0x19
+    OP_WHEEL_MAPPING = 0x1A
+    OP_SAVE_FLASH = 0x09
+    OP_RESET_PROFILE = 0x1B
 
     def __init__(
         self,
@@ -422,7 +468,73 @@ class Protocol:
     def build_power_mode_request(self) -> bytes:
         return self._build(self.CMD_POWER_MODE)
 
-    # -- pairing writes (probe tool only) ---------------------------------
+    def build_debounce_request(self) -> bytes:
+        return self._build(self.CMD_DEBOUNCE_READ)
+
+    def build_raw(self, payload: bytes | bytearray) -> bytes:
+        """Frame an already assembled command payload (opcode first)."""
+        return self.framing.encode(bytes(payload))
+
+    # -- configuration writes ---------------------------------------------
+    def build_set_polling_rate(self, hz: int) -> bytes:
+        if hz not in POLLING_RATE_LEVEL:
+            raise ValueError("polling rate must be one of %s Hz" % sorted(POLLING_RATE_LEVEL))
+        return self._build((self.OP_POLLING_RATE, POLLING_RATE_LEVEL[hz]))
+
+    def build_set_dpi(self, sensor_values: list[int], active_level: int) -> bytes:
+        """Batch DPI write: 1..5 presets (sensor values) and the active level."""
+        count = len(sensor_values)
+        if not 1 <= count <= MAX_DPI_LEVELS:
+            raise ValueError("between 1 and %d DPI presets are required" % MAX_DPI_LEVELS)
+        if not 1 <= active_level <= count:
+            raise ValueError("active level must be between 1 and %d" % count)
+        for value in sensor_values:
+            if not TRUEMOVE_AIR_MIN_SENSOR <= value <= TRUEMOVE_AIR_MAX_SENSOR:
+                raise ValueError("sensor value 0x%02X out of range" % value)
+        padded = list(sensor_values) + [0] * (MAX_DPI_LEVELS - count)
+        return self.build_raw(
+            struct.pack("<BBB5H", self.OP_BATCH_CPI, count, active_level, *padded)
+        )
+
+    def build_set_power_mode(self, mode: "PowerMode") -> bytes:
+        return self.build_raw(
+            struct.pack(
+                "<BBBHH",
+                self.OP_POWER_MODE,
+                mode.power_saving & 0xFF,
+                mode.movement_saving & 0xFF,
+                mode.idle_lighting & 0xFFFF,
+                mode.idle_sleep & 0xFFFF,
+            )
+        )
+
+    def build_set_debounce(self, make_ms: int, break_ms: int) -> bytes:
+        if not (0 <= make_ms <= 255 and 0 <= break_ms <= 255):
+            raise ValueError("debounce times must be 0..255 ms")
+        return self._build((self.OP_DEBOUNCE, make_ms, break_ms))
+
+    def build_live_color(self, r: int, g: int, b: int) -> bytes:
+        """Show a colour immediately (not stored; cleared by restart-lighting)."""
+        return self._build((self.OP_LED_DIRECT, 0x01, r & 0xFF, g & 0xFF, b & 0xFF))
+
+    def build_restart_lighting(self) -> bytes:
+        return self._build((self.OP_RESTART_LIGHTING,))
+
+    def build_save_to_flash(self) -> bytes:
+        return self._build((self.OP_SAVE_FLASH,))
+
+    def build_reset_profile(self) -> bytes:
+        return self._build((self.OP_RESET_PROFILE,))
+
+    # -- debounce ----------------------------------------------------------
+    def parse_debounce_response(self, data: bytes | bytearray) -> Optional[tuple[int, int]]:
+        """Parse the ``9E`` response: ``(make_ms, break_ms)``."""
+        decoded = self.framing.decode(data)
+        if len(decoded) < 2:
+            return None
+        return decoded[0], decoded[1]
+
+    # -- pairing writes ----------------------------------------------------
     def build_pair_dongle_request(self) -> bytes:
         """Pairing request ``71 00``; only effective in the mouse's pairing mode."""
         return self._build(self.CMD_PAIR_DONGLE)
@@ -603,6 +715,11 @@ __all__ = [
     "DEFAULT_TIMEOUT_MS",
     "DEFAULT_RETRIES",
     "POLLING_RATE_HZ",
+    "POLLING_RATE_LEVEL",
+    "MAX_DPI_LEVELS",
+    "SLEEP_TIMER_CHOICES_S",
+    "SUPPORTED_CPI",
+    "sensor_value_from_cpi",
     "TRUEMOVE_AIR_MIN_SENSOR",
     "TRUEMOVE_AIR_MAX_SENSOR",
     "cpi_from_sensor_value",

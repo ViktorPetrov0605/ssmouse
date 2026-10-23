@@ -29,14 +29,25 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QSystemTrayIcon,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from .. import __version__
-from ..device import ENV_FAKE
+from ..device import ENV_FAKE, DeviceNotFoundError, Mouse
+from ..profile import Profile
 from . import autostart
 from .model import Link, Snapshot, StatusTracker, describe_age, next_poll_delay, poll_once
+from .pages import (
+    ButtonsPage,
+    DevicePage,
+    LightingPage,
+    Page,
+    PerformancePage,
+    PowerPage,
+    read_config,
+)
 from .widgets import TIER_COLORS, BatteryGauge, Chip, tray_icon
 
 APP_ID = "ssmouse-gui"
@@ -54,13 +65,32 @@ LINK_COLORS = {
 
 
 class Poller(QObject):
-    """Runs device I/O on a worker thread so timeouts never freeze the UI."""
+    """Runs all device I/O on one worker thread.
+
+    Polls and configuration jobs are serialised here, so timeouts never
+    freeze the UI and two commands never interleave on the HID interface.
+    """
 
     result = Signal(object)
+    job_done = Signal(str, object, object)  # tag, result, error
 
     @Slot()
     def poll(self) -> None:
         self.result.emit(poll_once())
+
+    @Slot(str, object)
+    def run_job(self, tag: str, job) -> None:
+        try:
+            mouse = Mouse.detect()
+        except Exception as exc:  # noqa: BLE001 - reported to the UI
+            self.job_done.emit(tag, None, exc)
+            return
+        try:
+            self.job_done.emit(tag, job(mouse), None)
+        except Exception as exc:  # noqa: BLE001 - reported to the UI
+            self.job_done.emit(tag, None, exc)
+        finally:
+            mouse.close()
 
 
 class MainWindow(QWidget):
@@ -71,7 +101,8 @@ class MainWindow(QWidget):
         self.settings = settings
         self.setWindowTitle("ssmouse")
         self.setWindowIcon(QIcon.fromTheme("input-mouse"))
-        self.setMinimumWidth(380)
+        self.setMinimumWidth(460)
+        self.resize(540, 620)
 
         self.name_label = QLabel("SteelSeries mouse")
         font = self.name_label.font()
@@ -132,10 +163,9 @@ class MainWindow(QWidget):
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
+        self.status_page = QWidget()
+        layout = QVBoxLayout(self.status_page)
         layout.setSpacing(12)
-        layout.addLayout(header)
         layout.addWidget(self.gauge)
         layout.addWidget(self.battery_note)
         layout.addLayout(dpi_box)
@@ -143,10 +173,31 @@ class MainWindow(QWidget):
         layout.addWidget(line)
         layout.addLayout(controls)
         layout.addWidget(self.autostart_box)
+        layout.addStretch(1)
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.status_page, "Status")
+        self.message = QLabel("")
+        self.message.setWordWrap(True)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 16, 16, 12)
+        outer.setSpacing(10)
+        outer.addLayout(header)
+        outer.addWidget(self.tabs, 1)
+        outer.addWidget(self.message)
 
         self.hide_to_tray = False
         self._tray_hint_shown = bool(settings.value("tray_hint_shown", False, type=bool))
         self.tray: Optional[QSystemTrayIcon] = None
+
+    def add_page(self, page: QWidget, title: str) -> None:
+        self.tabs.addTab(page, title)
+
+    def show_message(self, text: str, error: bool = False) -> None:
+        color = TIER_COLORS["critical"].name() if error else "palette(window-text)"
+        self.message.setStyleSheet("color: %s;" % color)
+        self.message.setText(text)
 
     def interval(self) -> int:
         return int(self.settings.value("interval", DEFAULT_INTERVAL, type=int))
@@ -209,6 +260,7 @@ class MainWindow(QWidget):
 
 class Controller(QObject):
     poll_requested = Signal()
+    job_requested = Signal(str, object)
 
     def __init__(self, app: QApplication, start_minimized: bool) -> None:
         super().__init__()
@@ -231,8 +283,33 @@ class Controller(QObject):
         self.poller = Poller()
         self.poller.moveToThread(self.thread)
         self.poll_requested.connect(self.poller.poll)
+        self.job_requested.connect(self.poller.run_job)
         self.poller.result.connect(self.on_result)
+        self.poller.job_done.connect(self.on_job_done)
         self.thread.start()
+
+        self.linked = False
+        self.config_loaded = False
+        self.jobs_pending = 0
+        try:
+            self.profile = Profile.load()
+        except (OSError, ValueError) as exc:
+            self.profile = Profile()
+            self.window.show_message("Ignoring unreadable profile: %s" % exc, error=True)
+        self.pages: list[Page] = [
+            PerformancePage(self.profile),
+            LightingPage(self.profile),
+            ButtonsPage(self.profile),
+            PowerPage(self.profile),
+            DevicePage(self.profile),
+        ]
+        for page, title in zip(self.pages, ("Performance", "Lighting", "Buttons", "Power",
+                                             "Device")):
+            self.window.add_page(page, title)
+            page.apply_requested.connect(self.run_job)
+            page.profile_changed.connect(self.save_profile)
+            page.set_linked(False)
+        self.pages[-1].profile_replaced.connect(self.replace_profile)
 
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
@@ -301,11 +378,67 @@ class Controller(QObject):
         self.window.refresh_button.setEnabled(False)
         self.poll_requested.emit()
 
+    # -- configuration jobs ------------------------------------------------
+    @Slot(str, object)
+    def run_job(self, description: str, job) -> None:
+        self.jobs_pending += 1
+        self.window.show_message(description + "\u2026")
+        self.job_requested.emit(description, job)
+
+    def load_config(self) -> None:
+        self.jobs_pending += 1
+        self.job_requested.emit("read-config", read_config)
+
+    @Slot(str, object, object)
+    def on_job_done(self, tag: str, result, error) -> None:
+        self.jobs_pending = max(0, self.jobs_pending - 1)
+        if tag == "read-config":
+            if error is None:
+                self.config_loaded = True
+                for page in self.pages:
+                    page.load_config(result)
+            return
+        if error is not None:
+            if isinstance(error, DeviceNotFoundError):
+                text = "Receiver not found"
+            else:
+                text = str(error) or error.__class__.__name__
+            self.window.show_message("Failed: %s" % text, error=True)
+        else:
+            self.window.show_message(str(result))
+            if self.tray is not None and not self.window.isVisible():
+                self.tray.showMessage("ssmouse", str(result),
+                                      QSystemTrayIcon.MessageIcon.Information, 4000)
+        self.load_config()
+        self.refresh()
+
+    @Slot()
+    def save_profile(self) -> None:
+        try:
+            self.profile.save()
+        except (OSError, ValueError) as exc:
+            self.window.show_message("Could not save profile: %s" % exc, error=True)
+
+    @Slot(object)
+    def replace_profile(self, profile: Profile) -> None:
+        # Pages share this object, so update it in place.
+        vars(self.profile).update(vars(profile))
+        self.save_profile()
+        for page in self.pages:
+            page.reload()
+
     @Slot(object)
     def on_result(self, snapshot: Snapshot) -> None:
         self.busy = False
         self.window.refresh_button.setEnabled(True)
         self.on_snapshot(snapshot)
+        linked = snapshot.link is Link.CONNECTED
+        if linked != self.linked:
+            self.linked = linked
+            for page in self.pages:
+                page.set_linked(linked)
+        if linked and not self.config_loaded:
+            self.load_config()
         self.timer.start(int(next_poll_delay(self.last, self.window.interval()) * 1000))
 
     def on_snapshot(self, snapshot: Snapshot, notify: bool = True) -> None:

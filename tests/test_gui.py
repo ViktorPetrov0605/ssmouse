@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
@@ -113,6 +114,7 @@ def test_describe_age() -> None:
     assert describe_age(1000.0, now=1000.0 + 3 * 3600) == "3 h ago"
 
 
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="Windows uses the registry")
 def test_autostart_entry(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     assert not autostart.is_enabled()
@@ -164,3 +166,58 @@ def test_main_window_shows_snapshot(qapp, tmp_path) -> None:
     window.show_snapshot(Snapshot(link=Link.NO_PERMISSION))
     assert window.name_label.text() == "SteelSeries Rival 3 Wireless"
     assert "udev" in window.battery_note.text()
+
+
+def test_autostart_macos_launch_agent(tmp_path, monkeypatch) -> None:
+    import plistlib
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(autostart.Path, "home", classmethod(lambda cls: tmp_path))
+    autostart.set_enabled(True)
+    data = plistlib.loads(autostart.entry_path().read_bytes())
+    assert data["RunAtLoad"] is True
+    assert data["ProgramArguments"][-1] == "--minimized"
+    assert autostart.is_enabled()
+    autostart.set_enabled(False)
+    assert not autostart.is_enabled()
+
+
+def test_key_combination_to_spec(qapp) -> None:
+    from PySide6.QtCore import QKeyCombination, Qt
+
+    from ssmouse.gui.pages import key_combination_to_spec, spec_to_portable
+
+    combo = QKeyCombination(Qt.KeyboardModifier.ShiftModifier, Qt.Key.Key_F13)
+    assert key_combination_to_spec(combo) == "key:shift+f13"
+    combo = QKeyCombination(Qt.KeyboardModifier.AltModifier, Qt.Key.Key_PageDown)
+    assert key_combination_to_spec(combo) == "key:alt+pagedown"
+    combo = QKeyCombination(Qt.KeyboardModifier.NoModifier, Qt.Key.Key_VolumeUp)
+    assert key_combination_to_spec(combo) is None
+    assert spec_to_portable("key:ctrl+shift+t") == "Ctrl+Shift+T"
+
+
+def test_settings_pages(qapp) -> None:
+    from ssmouse.gui.pages import ButtonsPage, DeviceConfig, LightingPage, PerformancePage
+    from ssmouse.profile import Profile
+    from ssmouse.protocol import DpiInfo, DpiPreset
+
+    profile = Profile()
+    perf = PerformancePage(profile)
+    perf.load_config(DeviceConfig(
+        dpi=DpiInfo(2, 2, (DpiPreset(1, 4, 400), DpiPreset(2, 9, 800))), polling_hz=500))
+    assert perf.values() == ([400, 800], 2, 500)
+    perf.spins[0].setValue(450)
+    assert perf.values()[0] == [500, 800]  # half-up to the 100 CPI grid
+
+    light = LightingPage(profile)
+    light.mode.setCurrentIndex(light.mode.findData("colorshift"))
+    light._add_color((0, 0, 255))
+    effect = light.effect()
+    assert effect.mode == "colorshift" and len(effect.colors) == 2
+
+    buttons = ButtonsPage(profile)
+    buttons.rows["back"].set_spec("media:mute")
+    assert buttons.bindings()["back"] == "media:mute"
+    buttons.rows["left"].set_spec("disabled")
+    with pytest.raises(ValueError, match="Left click"):
+        buttons.bindings()

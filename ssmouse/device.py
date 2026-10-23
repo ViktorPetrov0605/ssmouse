@@ -15,9 +15,12 @@ import os
 import sys
 import time
 from dataclasses import dataclass, replace
-from typing import Iterable, Optional, Sequence
+from typing import TYPE_CHECKING, Iterable, Optional, Sequence
 
 from . import protocol
+
+if TYPE_CHECKING:
+    from .lighting import LightingEffect
 from .protocol import (
     DEFAULT_FRAMING,
     KNOWN_PIDS,
@@ -704,6 +707,122 @@ class Mouse:
             self.protocol.parse_power_mode_response,
             self.protocol.info_timeout_ms,
         )
+
+    def get_debounce(self) -> Optional[tuple[int, int]]:
+        """Query button debounce ``(make_ms, break_ms)`` (command ``9E``)."""
+        return self._read_optional(
+            self.protocol.build_debounce_request(),
+            self.protocol.parse_debounce_response,
+        )
+
+    # -- configuration writes ----------------------------------------------
+    #: The mouse does not acknowledge writes; callers verify by reading back.
+    def _write(self, request: bytes) -> None:
+        last_error: Optional[TransportError] = None
+        for _ in range(max(1, len(self.interfaces))):
+            self.open()
+            assert self._transport is not None
+            self._respect_command_spacing()
+            try:
+                self._transport.write_output(request)
+                return
+            except TransportError as exc:
+                last_error = exc
+                self._fail_over(exc)
+            finally:
+                self._last_command_at = time.monotonic()
+        raise last_error or TransportError("write failed")
+
+    def write_payloads(self, payloads: Iterable[bytes]) -> None:
+        """Send raw command payloads (opcode first) in order."""
+        for payload in payloads:
+            self._write(self.protocol.build_raw(payload))
+
+    def set_dpi(self, cpi_presets: Sequence[int], active_level: int) -> list[int]:
+        """Store 1..5 DPI presets and select one; returns the CPI actually used.
+
+        Values snap to the sensor's 100-CPI grid (100..18000).
+        """
+        sensor = [protocol.sensor_value_from_cpi(int(cpi)) for cpi in cpi_presets]
+        self._write(self.protocol.build_set_dpi(sensor, active_level))
+        return [protocol.cpi_from_sensor_value(value) for value in sensor]
+
+    def set_active_dpi_level(self, level: int) -> None:
+        """Switch to another stored preset, keeping the presets themselves."""
+        info = self.get_dpi()
+        if info is None:
+            raise TransportError("could not read the current DPI presets")
+        sensor = [preset.sensor for preset in info.presets[: info.level_max]]
+        self._write(self.protocol.build_set_dpi(sensor, level))
+
+    def set_polling_rate(self, hz: int, settle_s: float = 5.0) -> None:
+        """Change the report rate.
+
+        The mouse drops the radio link for ~2 s while it switches; wait up to
+        *settle_s* for it to come back so the next command is not lost.
+        """
+        self._write(self.protocol.build_set_polling_rate(hz))
+        deadline = time.monotonic() + settle_s
+        time.sleep(min(1.0, settle_s))
+        while time.monotonic() < deadline:
+            if self.get_rf_status():
+                return
+            time.sleep(0.25)
+
+    def set_power_mode(self, mode: protocol.PowerMode) -> None:
+        self._write(self.protocol.build_set_power_mode(mode))
+
+    def set_debounce(self, make_ms: int, break_ms: int) -> None:
+        self._write(self.protocol.build_set_debounce(make_ms, break_ms))
+
+    def set_live_color(self, rgb: tuple[int, int, int]) -> None:
+        """Show a colour right away without storing it (``restart_lighting`` undoes it)."""
+        self._write(self.protocol.build_live_color(*rgb))
+
+    def restart_lighting(self) -> None:
+        self._write(self.protocol.build_restart_lighting())
+
+    def set_lighting(self, effect: "LightingEffect") -> None:
+        """Upload and activate a wheel-LED effect."""
+        from .lighting import effect_payloads
+
+        self.write_payloads(effect_payloads(effect))
+
+    def set_bindings(self, bindings: dict[str, str]) -> None:
+        """Remap buttons and wheel; controls not listed get their default action."""
+        from .bindings import mapping_payloads
+
+        self.write_payloads(mapping_payloads(bindings))
+
+    def save_to_flash(self) -> None:
+        """Persist the current settings in the mouse's flash memory."""
+        self._write(self.protocol.build_save_to_flash())
+
+    def reset_profile(self, persist: bool = True) -> None:
+        """Restore the mouse's factory settings (and store them in flash)."""
+        self._write(self.protocol.build_reset_profile())
+        if persist:
+            time.sleep(0.5)
+            self.save_to_flash()
+
+    def pair(self, timeout_s: float = 20.0, poll_s: float = 2.0) -> bool:
+        """Run GG's pairing flow: ``71 00``, poll ``E8`` until linked, ``73`` on timeout.
+
+        Put the mouse in pairing mode first.  Returns True once linked.
+        """
+        self._write(self.protocol.build_pair_dongle_request())
+        deadline = time.monotonic() + timeout_s
+        linked = 0
+        while time.monotonic() < deadline:
+            time.sleep(poll_s)
+            if self.get_rf_status():
+                linked += 1
+                if linked >= 2:
+                    return True
+            else:
+                linked = 0
+        self._write(self.protocol.build_reset_wireless_request())
+        return False
 
     # -- metadata ----------------------------------------------------------
     def get_info(self) -> DeviceInfo:

@@ -1,21 +1,35 @@
-# ssmouse: SteelSeries Rival 3 Wireless battery on Linux
+# ssmouse: an open-source SteelSeries GG for the Rival 3 Wireless
 
-Read the **battery level**, **DPI presets**, **polling rate**, **firmware** and
-**connection state** of a SteelSeries Rival 3 Wireless (USB `1038:1830`)
-without SteelSeries GG. It comes as a **system-tray app** and a **CLI with JSON
-output**. Linux is the main target; Windows and macOS work too.
+Configure and monitor a SteelSeries Rival 3 Wireless (USB `1038:1830`) without
+SteelSeries GG, on **Linux, Windows and macOS**. It comes as a desktop app with a
+battery tray icon, and as a scriptable CLI.
 
-![ssmouse window](docs/screenshot.png)
+<p>
+<img src="docs/screenshot.png" width="32%" alt="Status tab">
+<img src="docs/performance.png" width="32%" alt="Performance tab">
+<img src="docs/buttons.png" width="32%" alt="Buttons tab">
+</p>
 
-* Tray icon showing the battery percentage, colour-coded (green / amber / red)
-* Desktop notification when the battery drops to 20 % and again at 10 %
-* Remembers the last reading while the mouse sleeps, and picks it back up within
-  seconds once you move the mouse
-* Optional start on login (XDG autostart)
-* CLI for scripts and status bars: `ssmouse --json battery` → `{"level": 71, "charging": null}`
+| Feature | GG | ssmouse |
+|---|---|---|
+| Battery level, tray icon, low-battery notifications | ✓ | ✓ |
+| DPI presets (1–5, 100–18000 CPI) and active preset | ✓ | ✓ |
+| Polling rate (125 / 250 / 500 / 1000 Hz) | ✓ | ✓ |
+| Wheel LED: steady, colour shift, breathe, reactive, off | ✓ | ✓ |
+| Button and wheel remapping: mouse buttons, DPI cycle, scroll, key combos, media keys, disable | ✓ | ✓ |
+| Sleep timer, sensor rest, high-efficiency mode | ✓ | ✓ |
+| Button debounce (in GG's device descriptor, not shown in its UI) | – | ✓ |
+| Firmware version check and update | ✓ | ✓ (with your GG firmware files) |
+| Pairing, factory reset | ✓ | ✓ |
+| Profiles: export / import | cloud | JSON file |
+| Macros, acceleration / angle snapping, Prism Sync, GameSense | ✓ | – (implemented in GG's Windows driver, not in the mouse) |
 
-The protocol was reverse engineered from SteelSeries GG. No vendor code or data
-files are included. See [Protocol reference](#protocol-reference).
+Every setting is written to the mouse and **saved in its flash memory**, so it
+keeps working on any computer, even one without ssmouse. All of the above has
+been verified on real hardware (firmware 1.04).
+
+The protocol was reverse engineered from SteelSeries GG. No SteelSeries code,
+data or firmware is included. See [Protocol reference](#protocol-reference).
 
 ---
 
@@ -54,10 +68,16 @@ pipx install '.[gui]'            # or: pip install '.[gui]' inside a venv
 
 ### Windows / macOS
 
+Download the app from the [releases page](https://github.com/ViktorPetrov0605/ssmouse/releases),
+or install from source:
+
 ```console
 pip install '.[gui]'
 ssmouse-gui
 ```
+
+Quit SteelSeries GG first: both programs talking to the mouse at once will
+fight over its settings.
 
 Windows and macOS need no udev rule. The libusb `hidapi` backend is picked
 automatically. On macOS, grant Input Monitoring if prompted.
@@ -80,6 +100,10 @@ ssmouse-gui --fake        # demo with captured data, no mouse needed
   costs nothing on the radio. That check runs every 5 s, so a fresh reading
   appears soon after you touch the mouse.
 * Launching it a second time just brings up the existing window.
+* Tabs: **Status**, **Performance** (DPI presets, polling rate), **Lighting**,
+  **Buttons** (press a shortcut to bind it), **Power** (sleep timer, sensor
+  rest, high-efficiency mode, debounce) and **Device** (pairing, profiles,
+  factory reset, firmware). Settings tabs apply when the mouse is awake.
 * On GNOME the tray icon needs the *AppIndicator and KStatusNotifierItem
   Support* extension. Without a tray the app runs as a normal window.
 
@@ -127,6 +151,54 @@ SteelSeries Rival 3 Wireless
 Captured byte sequences can be replayed, so the CLI, GUI and tests run on any
 machine: `ssmouse --fake --json info`, `ssmouse-gui --fake`, or set
 `SSMOUSE_FAKE=1` in the environment.
+
+### Configuration
+
+```console
+ssmouse set dpi 400,800,1600,3200 --active 2   # 1-5 presets, snapped to 100 CPI
+ssmouse set dpi-level 3                        # switch preset
+ssmouse set polling 1000                       # 125 | 250 | 500 | 1000
+ssmouse set sleep 10m                          # 1-20 minutes
+ssmouse set sensor-rest on
+ssmouse set high-efficiency off                # on = 125 Hz, longest battery life
+ssmouse set debounce 6 20                      # press / release in ms
+
+ssmouse light steady ff5500
+ssmouse light colorshift red,green,blue --duration 3000
+ssmouse light breathe cyan --duration 4000
+ssmouse light reactive 0000ff --flash ffffff --fade 800
+ssmouse light off
+ssmouse light preview ff0000                   # show now, don't store
+
+ssmouse bind                                   # show the current mapping
+ssmouse bind back key:ctrl+c
+ssmouse bind forward media:volume-up           # mute, next, previous, play-pause, volume-up/down
+ssmouse bind dpi disabled
+ssmouse bind --reset
+
+ssmouse profile show | apply | path | export FILE | import FILE
+ssmouse pair                                   # pair a new receiver
+ssmouse reset                                  # factory settings
+ssmouse firmware                               # installed vs. newest known version
+ssmouse firmware update PATH/TO/GG/firmware/272111664 [--dry-run]
+```
+
+Each change is saved to the mouse's flash. Add `--no-save` to try something
+out: lighting and button changes made that way are lost when the mouse is
+switched off. Your settings are also recorded in a profile file
+(`ssmouse profile path`) so you can export them or re-apply them later.
+
+### Firmware updates
+
+SteelSeries' firmware can't be redistributed, so `ssmouse firmware update` uses
+the files from a SteelSeries GG installation (`apps/engine/firmware/272111664/`).
+It follows GG's procedure exactly: it flashes the mouse over 2.4 GHz, then the
+receiver's radio and USB chips, which takes about a minute. The protocol has no
+checksum, so ssmouse refuses unless the files are newer than what's installed,
+the mouse is awake and the battery is at least 30 %. **Do not switch off the
+mouse or unplug the receiver while it runs.** `--dry-run` validates the files
+and shows the plan without writing anything. SteelSeries GG 122 ships 1.04,
+which is what current mice already run.
 
 ### Usage
 
@@ -288,6 +360,32 @@ power-mode   TX: AB (read-op 0x2B)           RX: u8 power_saving, u8
                                                  idle_lighting, u16 LE idle_sleep
 ```
 
+**Write commands.** The mouse does not answer writes; read the value back
+to verify.
+
+```
+polling      17 level                         0..3 = 1000/500/250/125 Hz
+dpi          20 count active s1..s5           u16 LE sensor values
+power        2B saving movement u16 idle_light u16 idle_sleep_s
+debounce     1E make_ms break_ms              read with 9E
+live colour  13 01 r g b                      until 18 (restart lighting)
+buttons      19 + 7 x (fn, k1, k2, k3, k4)    L, R, M, back, forward, DPI, unused
+wheel        1A + 2 x (fn, k1..k4)            up, down
+             fn: 00 off, 01-06 mouse buttons, 30 DPI, 31/32 scroll,
+                 51 keys (modifier usages then key usage), 61 consumer usage
+lighting     03 00 off16 len16 data           48-byte chunks of a 92-byte effect
+             05 00 10FF 00000000 len16        push to effect 0xFF10
+             1C 00 0000 0000 00               bind the LED to effect 0
+save         09                               store everything in flash
+factory      1B
+pair         71 00, poll E8 for 4, 73 on timeout
+firmware     (08|m) erase, (03|m) buffer, (05|m) push; m = 00 mouse, 40 receiver
+```
+
+The 92-byte effect is `u32 duration_ms, i32 wave, i16 x, i16 y, 4 x u8 scale,
+u8 overflow + 3 pad, u32 trigger mask, u8 sections, rgb initial, 16 x (rgb,
+u8 share of the cycle in 1/255)`; see `ssmouse/lighting.py`.
+
 **DPI conversion.** The DPI struct stores sensor values, not CPI. The full
 `truemove-air` table (`0x00 → 100`, `0x02 → 200`, … `0xD6 → 18000`) is embedded
 in `ssmouse/protocol.py`; values missing from the table use the vendor
@@ -310,14 +408,21 @@ ssmouse/
 ├── device.py      # VID/PID detection, interface ranking, failover, high-level reads
 ├── status.py      # one-shot "read everything" shared by CLI and GUI
 ├── fake.py        # captured/replay transport used by tests and --fake
+├── lighting.py    # wheel LED effect encoder (GG's libsteel format)
+├── bindings.py    # button / wheel mapping encoder, key and media names
+├── profile.py     # JSON profile, apply to mouse, config directory per OS
+├── firmware.py    # version check, package validation, GG's update sequence
 ├── cli.py         # info/battery/dpi, --json, --watch, --debug
+├── cli_config.py  # set / light / bind / profile / pair / reset / firmware
 └── gui/
     ├── model.py     # Qt-free state: polling, last-known battery, alerts
     ├── widgets.py   # battery gauge, tray icon renderer
-    ├── app.py       # window, tray, worker thread, single instance
-    └── autostart.py # XDG autostart entry
+    ├── pages.py     # Performance, Lighting, Buttons, Power, Device tabs
+    ├── app.py       # window, tray, device worker thread, single instance
+    └── autostart.py # start on login: XDG / Windows Run key / LaunchAgent
 tests/             # pytest suite (no hardware needed)
 tools/probe.py     # hardware probe: enumeration, descriptors, commands, raw hex, pairing
+packaging/         # PyInstaller entry points (release workflow builds all OSes)
 udev/99-steelseries.rules
 data/ssmouse-gui.desktop
 install.sh
@@ -353,17 +458,10 @@ The mouse dropped the link mid-read. Retry after moving it.
 Usually the batteries are empty. Below a few percent the mouse cannot hold the
 2.4 GHz link, and its scroll wheel blinks white while it searches. Replace the
 batteries first. If it still won't link, it may be paired to another receiver.
-Run the vendor pairing flow from the probe tool:
-
-```console
-.venv/bin/python tools/probe.py --pair
-```
-
-It writes `71` (pair_dongle), polls `E8` every 2 s for 20 s (success = `4`
-twice), and sends `73` (reset_wireless) on timeout — the same sequence
-SteelSeries GG uses. This is a **write** operation, which is why it lives in
-`tools/probe.py` and not in the read-only `ssmouse` CLI. If pairing still
-fails, check that the AA batteries are charged and the mouse is powered on.
+Pair it again with `ssmouse pair` (or *Device → Pair mouse with receiver*),
+then switch the mouse off and on in 2.4 GHz mode within 20 seconds. This
+writes `71` (pair_dongle), polls `E8` every 2 s (success = `4` twice) and sends
+`73` (reset_wireless) on timeout, the same sequence SteelSeries GG uses.
 
 **`no 1038:… device found`**
 * Check `lsusb | grep 1038` and `ls -l /dev/hidraw*`.
@@ -436,13 +534,15 @@ Live verification against the hardware (when connected):
 
 ## Limitations
 
-* Read-only by design: no DPI/polling/RGB/button **writes** are implemented.
-* Charging state is unavailable on this AA-battery model (`null`).
-* Serial number is empty on the tested unit; the field is passed through from
-  HID enumeration when present.
-* Firmware string format is `major.minor` (e.g. `1.04`) as declared by the
-  descriptor.
-* Pairing writes (`71`/`73`) are available only in `tools/probe.py`; the
-  `ssmouse` CLI is read-only by design.
-* Only the Rival 3 Wireless (`1038:1830`) is verified. Related PIDs
-  (`0x1832`, `0x1834`, `0x1836`) are detected but not validated.
+* Only the Rival 3 Wireless (`1038:1830`, firmware 1.04) is verified. Related
+  PIDs are detected but not validated.
+* The mouse cannot report its lighting or button mappings, so ssmouse shows
+  what it last applied (stored in the profile).
+* Bluetooth mode is not supported. GG's own descriptor disables every
+  setting in Bluetooth mode; the vendor protocol needs the 2.4 GHz receiver.
+* Macros, acceleration/deceleration, angle snapping, Prism Sync and GameSense
+  are implemented by SteelSeries GG's Windows driver on the computer, not by
+  the mouse, so there is nothing to port at the protocol level.
+* The firmware update runs exactly GG's sequence but has not been exercised
+  on hardware, since no firmware newer than 1.04 exists to install.
+* Windows and macOS builds pass CI but have not been tried on real hardware yet.

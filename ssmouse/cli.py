@@ -32,7 +32,7 @@ import sys
 import time
 from typing import Optional
 
-from . import __version__
+from . import __version__, cli_config
 from .device import (
     ENV_BACKEND,
     ENV_FAKE,
@@ -42,6 +42,7 @@ from .device import (
     DeviceNotFoundError,
     Mouse,
 )
+from .firmware import FirmwareError
 from .protocol import FRAMING_PRESETS, ProtocolError
 from .status import NOT_LINKED_MESSAGE, collect_info, require_link
 from .transport import TransportError, available_backends, set_trace
@@ -134,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="ssmouse",
-        description="Read battery, DPI and basic info from a SteelSeries mouse.",
+        description="Read and configure a SteelSeries Rival 3 Wireless (battery, DPI, polling, power, lighting, buttons).",
         parents=[common],
     )
     parser.add_argument(
@@ -145,13 +146,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version", action="version", version="ssmouse %s" % __version__
     )
-    subparsers = parser.add_subparsers(dest="command", metavar="{info,battery,dpi}")
+    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
     for name, help_text in (
         ("info", "device metadata, battery, DPI, polling rate, firmware"),
         ("battery", "battery level"),
         ("dpi", "DPI presets and active CPI"),
     ):
         subparsers.add_parser(name, parents=[common], help=help_text)
+    cli_config.add_parsers(subparsers, common)
     return parser
 
 
@@ -467,6 +469,16 @@ def _main_impl(argv: Optional[list[str]] = None) -> int:
     if not command:
         parser.print_help()
         return EXIT_ERROR
+
+    if command in cli_config.COMMANDS:
+        try:
+            return cli_config.run(args, lambda: _make_mouse(args), as_json)
+        except DeviceNotFoundError as exc:
+            print("ssmouse: %s" % exc, file=sys.stderr)
+            return EXIT_NO_DEVICE
+        except (TransportError, ProtocolError, ValueError, OSError, FirmwareError) as exc:
+            print("ssmouse: %s" % exc, file=sys.stderr)
+            return EXIT_ERROR
 
     watch = _opt(args, "watch", False)
     interval = _opt(args, "interval", DEFAULT_WATCH_INTERVAL)
