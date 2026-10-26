@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag like v0.3.0 to build standalone apps and attach them to a release.
+# Push a tag like v0.4.0 to build portable binaries and attach them to a release.
 on:
   push:
     tags: ["v*"]
@@ -9,49 +9,94 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-22.04, name: linux-x86_64 }
-          - { os: windows-latest, name: windows-x86_64 }
-          - { os: macos-latest, name: macos-arm64 }
+  linux:
+    # Older glibc for the GUI so it runs on most distributions; the CLI is fully static.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: "3.12"
-      - run: pip install ".[gui]" pyinstaller
-      - name: Build
-        shell: bash
-        run: |
-          pyinstaller --noconfirm --onefile --name ssmouse --paths . packaging/ssmouse_cli.py
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            pyinstaller --noconfirm --windowed --name ssmouse-gui --paths . \
-              --osx-bundle-identifier io.github.viktorpetrov0605.ssmouse packaging/ssmouse_gui.py
-          else
-            pyinstaller --noconfirm --onefile --windowed --name ssmouse-gui --paths . packaging/ssmouse_gui.py
-          fi
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --bin ssmouse-gui
+      - run: cargo build --release --no-default-features --bin ssmouse --target x86_64-unknown-linux-musl
       - name: Package
-        shell: bash
         run: |
-          mkdir -p out
-          case "$RUNNER_OS" in
-            Windows) 7z a "out/ssmouse-${{ matrix.name }}.zip" ./dist/ssmouse.exe ./dist/ssmouse-gui.exe README.md LICENSE ;;
-            macOS)   (cd dist && zip -qry "../out/ssmouse-${{ matrix.name }}.zip" ssmouse ssmouse-gui.app) ;;
-            *)       cp udev/99-steelseries.rules data/ssmouse-gui.desktop dist/ &&
-                     tar -czf "out/ssmouse-${{ matrix.name }}.tar.gz" -C dist ssmouse ssmouse-gui 99-steelseries.rules ssmouse-gui.desktop ;;
-          esac
+          d=ssmouse-linux-x86_64
+          mkdir $d
+          cp target/x86_64-unknown-linux-musl/release/ssmouse target/release/ssmouse-gui $d/
+          cp install.sh udev/99-steelseries.rules data/ssmouse-gui.desktop README.md LICENSE $d/
+          tar -czf $d.tar.gz $d
       - uses: actions/upload-artifact@v4
         with:
-          name: ssmouse-${{ matrix.name }}
-          path: out/*
+          name: linux
+          path: ssmouse-linux-x86_64.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory ssmouse-windows-x86_64 | Out-Null
+          Copy-Item target/release/ssmouse.exe, target/release/ssmouse-gui.exe, README.md, LICENSE ssmouse-windows-x86_64/
+          Compress-Archive ssmouse-windows-x86_64 ssmouse-windows-x86_64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: ssmouse-windows-x86_64.zip
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+      - name: Package (universal binaries + app bundle)
+        run: |
+          d=ssmouse-macos-universal
+          mkdir -p $d/ssmouse.app/Contents/MacOS
+          for b in ssmouse ssmouse-gui; do
+            lipo -create -output $d/$b target/aarch64-apple-darwin/release/$b target/x86_64-apple-darwin/release/$b
+          done
+          cp $d/ssmouse-gui $d/ssmouse.app/Contents/MacOS/ssmouse-gui
+          version="${GITHUB_REF_NAME#v}"
+          cat > $d/ssmouse.app/Contents/Info.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>ssmouse</string>
+            <key>CFBundleIdentifier</key><string>io.github.viktorpetrov0605.ssmouse</string>
+            <key>CFBundleExecutable</key><string>ssmouse-gui</string>
+            <key>CFBundleShortVersionString</key><string>${version}</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSUIElement</key><true/>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          rm $d/ssmouse-gui
+          cp README.md LICENSE $d/
+          zip -qry $d.zip $d
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: ssmouse-macos-universal.zip
 
   release:
-    needs: build
+    needs: [linux, windows, macos]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:

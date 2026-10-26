@@ -1,17 +1,11 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-build/
-dist/
-
-# Environments
-.venv/
-venv/
-
-# Editor / OS
+/target
+*.tmp
+.DS_Store
 .idea/
 .vscode/
-.DS_Store
+# Old Python build leftovers
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
 .ruff_cache/

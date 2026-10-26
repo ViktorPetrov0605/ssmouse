@@ -4,27 +4,36 @@ on:
   push:
   pull_request:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: ubuntu-latest, python: "3.10" }
-          - { os: ubuntu-latest, python: "3.13" }
-          - { os: windows-latest, python: "3.12" }
-          - { os: macos-latest, python: "3.12" }
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: ${{ matrix.python }}
-      - name: Qt runtime libraries
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
-      - run: pip install -e ".[gui,dev]"
-      - run: ruff check ssmouse tests
-      - run: pytest
-        env:
-          QT_QPA_PLATFORM: offscreen
+        run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  static-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --no-default-features --bin ssmouse --target x86_64-unknown-linux-musl
+      - run: file target/x86_64-unknown-linux-musl/release/ssmouse

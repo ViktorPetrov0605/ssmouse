@@ -1,0 +1,55 @@
+[package]
+name = "ssmouse"
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Open-source SteelSeries GG replacement for the Rival 3 Wireless: battery, DPI, lighting, buttons, power, firmware"
+license = "MIT"
+authors = ["Viktor Petrov"]
+repository = "https://github.com/ViktorPetrov0605/ssmouse"
+readme = "README.md"
+keywords = ["steelseries", "mouse", "hid", "battery", "rival"]
+categories = ["hardware-support", "command-line-utilities"]
+
+[features]
+default = ["gui"]
+# The tray app and settings window. Without it only the `ssmouse` CLI is built
+# (used for the fully static musl build).
+gui = ["dep:eframe", "dep:ksni", "dep:tray-icon", "dep:tao", "dep:notify-rust"]
+
+[dependencies]
+hidapi = { version = "2.6.7", default-features = false, features = ["linux-native-basic-udev"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+md-5 = "0.11.0"
+ureq = { version = "3.5.0", default-features = false, features = ["rustls", "json"] }
+clap = { version = "4", features = ["derive"] }
+
+eframe = { version = "0.37.0", optional = true, default-features = false, features = ["glow", "default_fonts", "wayland", "x11", "links"] }
+notify-rust = { version = "4.18.2", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.7", optional = true, default-features = false, features = ["blocking", "async-io"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = { version = "0.26.1", optional = true }
+tao = { version = "0.37.2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56.0"
+
+[[bin]]
+name = "ssmouse"
+path = "src/bin/ssmouse.rs"
+
+[[bin]]
+name = "ssmouse-gui"
+path = "src/bin/ssmouse-gui.rs"
+required-features = ["gui"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

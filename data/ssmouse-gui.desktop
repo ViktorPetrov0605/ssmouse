@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=ssmouse
-GenericName=Mouse Battery
-Comment=Battery level and DPI of SteelSeries wireless mice
+GenericName=Mouse Settings
+Comment=Battery, DPI, lighting and buttons of SteelSeries wireless mice
 Exec=ssmouse-gui
 Icon=input-mouse
 Terminal=false
