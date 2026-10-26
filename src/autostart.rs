@@ -48,6 +48,7 @@ fn quote(arg: &str) -> String {
     }
 }
 
+#[cfg(not(windows))]
 fn xml_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
